@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: front-aula-12
+  labels:
+    app: front-aula-12
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: front-aula-12
+  template:
+    metadata:
+      labels:
+        app: front-aula-12
+    spec:
+      containers:
+        - name: front
+          image: front-aula-12:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

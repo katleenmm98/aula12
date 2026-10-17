@@ -1,0 +1,102 @@
+name: Build e Deploy no kind
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Tag única por commit: força o rollout dos pods a cada deploy
+  IMAGE: front-aula-12:${{ github.sha }}
+  # Nome padrão do kind (mesmo de "kind create cluster")
+  CLUSTER_NAME: kind
+  APP: front-aula-12
+  NODE_PORT: 30081
+
+jobs:
+  build:
+    name: Build
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build da imagem no Docker local
+        run: docker build -t "$IMAGE" front
+
+      # Sem registry: a imagem vai para o stage de deploy como artefato
+      - name: Exportar imagem
+        run: docker save "$IMAGE" -o imagem.tar
+
+      - name: Publicar artefato da imagem
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagem
+          path: imagem.tar
+          retention-days: 1
+
+  deploy:
+    name: Deploy
+    runs-on: self-hosted
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verificar ferramentas
+        run: |
+          docker version --format 'Docker {{.Server.Version}}'
+          kind version
+          kubectl version --client
+
+      # Usa o cluster criado com "kind create cluster"; cria se ainda não existir
+      - name: Garantir cluster kind
+        run: |
+          if kind get clusters | grep -qx "$CLUSTER_NAME"; then
+            echo "Cluster '$CLUSTER_NAME' encontrado"
+          else
+            echo "Cluster '$CLUSTER_NAME' não encontrado, criando..."
+            kind create cluster --name "$CLUSTER_NAME" --wait 120s
+          fi
+
+      - name: Configurar kubectl
+        run: |
+          kind export kubeconfig --name "$CLUSTER_NAME"
+          kubectl get nodes
+
+      - name: Baixar artefato da imagem
+        uses: actions/download-artifact@v4
+        with:
+          name: imagem
+
+      - name: Carregar imagem no kind
+        run: |
+          docker load -i imagem.tar
+          kind load docker-image "$IMAGE" --name "$CLUSTER_NAME"
+          rm -f imagem.tar
+
+      - name: Aplicar manifestos
+        run: |
+          kubectl apply -f manifestos/service.yaml
+          sed "s|image: front-aula-12:.*|image: $IMAGE|" manifestos/deployment.yaml | kubectl apply -f -
+
+      - name: Aguardar rollout
+        run: kubectl rollout status "deployment/$APP" --timeout=120s
+
+      # No Linux o IP do nó do kind é acessível direto da VM pelo NodePort
+      - name: Testar aplicação
+        run: |
+          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          URL="http://$NODE_IP:$NODE_PORT"
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "$URL/health"
+          echo
+          curl --fail --silent --show-error "$URL" | head -n 10
+          echo "Aplicação disponível em: $URL"
+          echo "### Aplicação disponível em: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnóstico em caso de falha
+        if: failure()
+        run: |
+          kubectl get pods,svc -o wide
+          kubectl describe deployment "$APP"
+          kubectl logs "deployment/$APP" --all-containers --tail=50 || true
